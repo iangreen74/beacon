@@ -1,74 +1,10 @@
+from pydantic import BaseModel, Field, EmailStr
+from typing import Optional
 from datetime import datetime
-from typing import Optional, List
-from enum import Enum
-
-from pydantic import BaseModel, Field, validator, constr
-import bleach
-
-
-class MoodEnum(str, Enum):
-    great = "great"
-    good = "good"
-    okay = "okay"
-    bad = "bad"
-    terrible = "terrible"
-
-
-class UserRole(str, Enum):
-    admin = "admin"
-    manager = "manager"
-    member = "member"
-
-
-class SanitizedStr(constr):
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v):
-        if isinstance(v, str):
-            return bleach.clean(v, tags=[], strip=True)
-        return v
-
-
-class UserBase(BaseModel):
-    email: str = Field(..., max_length=255)
-    full_name: Optional[str] = Field(None, max_length=255)
-
-    @validator('email')
-    def sanitize_email(cls, v):
-        return bleach.clean(v, tags=[], strip=True).lower()
-
-    @validator('full_name')
-    def sanitize_name(cls, v):
-        if v:
-            return bleach.clean(v, tags=[], strip=True)
-        return v
-
-
-class UserCreate(UserBase):
-    password: str = Field(..., min_length=8, max_length=128)
-
-
-class UserResponse(UserBase):
-    id: int
-    role: UserRole
-    created_at: datetime
-
-    class Config:
-        orm_mode = True
 
 
 class TeamBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
-    description: Optional[str] = Field(None, max_length=1000)
-
-    @validator('name', 'description')
-    def sanitize_text(cls, v):
-        if v:
-            return bleach.clean(v, tags=[], strip=True)
-        return v
 
 
 class TeamCreate(TeamBase):
@@ -77,23 +13,37 @@ class TeamCreate(TeamBase):
 
 class TeamResponse(TeamBase):
     id: int
-    manager_id: int
     created_at: datetime
+    updated_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
+
+
+class UserBase(BaseModel):
+    email: EmailStr
+    full_name: Optional[str] = Field(None, max_length=255)
+
+
+class UserCreate(UserBase):
+    password: str = Field(..., min_length=8)
+    team_id: Optional[int] = None
+
+
+class UserResponse(UserBase):
+    id: int
+    is_active: bool
+    team_id: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 class PulseBase(BaseModel):
-    mood: MoodEnum
-    feedback: Optional[str] = Field(None, max_length=2000)
-    is_anonymous: bool = False
-
-    @validator('feedback')
-    def sanitize_feedback(cls, v):
-        if v:
-            return bleach.clean(v, tags=[], strip=True)
-        return v
+    title: str = Field(..., min_length=1, max_length=255)
+    description: Optional[str] = None
 
 
 class PulseCreate(PulseBase):
@@ -103,48 +53,66 @@ class PulseCreate(PulseBase):
 class PulseResponse(PulseBase):
     id: int
     team_id: int
-    user_id: Optional[int]
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PulseResponseBase(BaseModel):
+    response_text: str = Field(..., min_length=1)
+
+
+class PulseResponseCreate(PulseResponseBase):
+    pulse_id: int
+    user_id: int
+
+
+class PulseResponseSchema(PulseResponseBase):
+    id: int
+    pulse_id: int
+    user_id: int
+    sentiment_score: Optional[int]
     created_at: datetime
 
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 
-class AnalysisRequest(BaseModel):
-    team_id: int
-    start_date: Optional[datetime]
-    end_date: Optional[datetime]
+class NotificationBase(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    message: str = Field(..., min_length=1)
 
 
-class AnalysisResponse(BaseModel):
-    team_id: int
-    insights: str
-    sentiment_score: float
-    generated_at: datetime
+class NotificationCreate(NotificationBase):
+    user_id: int
 
 
-class TrendResponse(BaseModel):
-    team_id: int
-    trend_type: str
-    severity: str
-    description: str
-    detected_at: datetime
+class NotificationResponse(NotificationBase):
+    id: int
+    user_id: int
+    is_read: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
-class LoginRequest(BaseModel):
-    email: str = Field(..., max_length=255)
-    password: str = Field(..., max_length=128)
-
-    @validator('email')
-    def sanitize_email(cls, v):
-        return bleach.clean(v, tags=[], strip=True).lower()
+class AnalysisResultBase(BaseModel):
+    analysis_type: str = Field(..., min_length=1, max_length=100)
+    result_data: str = Field(..., min_length=1)
 
 
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+class AnalysisResultCreate(AnalysisResultBase):
+    pulse_id: int
 
 
-class ErrorResponse(BaseModel):
-    detail: str
-    error_code: Optional[str] = None
+class AnalysisResultResponse(AnalysisResultBase):
+    id: int
+    pulse_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
