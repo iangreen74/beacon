@@ -1,96 +1,133 @@
-from fastapi import Request, status
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
+"""Middleware components for request processing and rate limiting.
+
+Provides rate limiting functionality to protect analysis endpoints
+from abuse and ensure fair resource allocation.
+"""
+
+from typing import Dict, Tuple
+from datetime import datetime, timedelta
+from collections import defaultdict
+import threading
+
+from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
-from sqlalchemy.exc import SQLAlchemyError
-from pydantic import ValidationError
-import logging
-
-from app.schemas import ErrorResponse
-
-logger = logging.getLogger(__name__)
+from starlette.responses import Response
 
 
-def configure_cors(app, allowed_origins: list = None):
-    """Configure CORS with explicit allowed origins."""
-    if allowed_origins is None:
-        allowed_origins = [
-            "http://localhost:3000",
-            "http://localhost:8000",
-        ]
+class RateLimiter:
+    """Token bucket rate limiter for API endpoints.
     
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-        allow_headers=["Authorization", "Content-Type"],
-        max_age=600,
-    )
-
-
-class SecurityHeadersMiddleware(BaseHTTPMiddleware):
-    """Add security headers to all responses."""
+    Implements per-user rate limiting with configurable limits
+    and time windows. Thread-safe implementation.
+    """
     
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, requests_per_minute: int = 10, requests_per_hour: int = 100):
+        """Initialize rate limiter.
+        
+        Args:
+            requests_per_minute: Maximum requests per minute per user
+            requests_per_hour: Maximum requests per hour per user
+        """
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_hour = requests_per_hour
+        self.minute_buckets: Dict[str, list] = defaultdict(list)
+        self.hour_buckets: Dict[str, list] = defaultdict(list)
+        self.lock = threading.Lock()
+    
+    def _clean_old_requests(self, bucket: list, window_seconds: int) -> None:
+        """Remove expired timestamps from bucket.
+        
+        Args:
+            bucket: List of request timestamps
+            window_seconds: Time window in seconds
+        """
+        cutoff = datetime.now() - timedelta(seconds=window_seconds)
+        while bucket and bucket[0] < cutoff:
+            bucket.pop(0)
+    
+    def check_rate_limit(self, user_id: int) -> Tuple[bool, str]:
+        """Check if user has exceeded rate limits.
+        
+        Args:
+            user_id: User identifier
+            
+        Returns:
+            Tuple of (is_allowed, error_message)
+        """
+        with self.lock:
+            key = str(user_id)
+            now = datetime.now()
+            
+            # Check minute limit
+            minute_bucket = self.minute_buckets[key]
+            self._clean_old_requests(minute_bucket, 60)
+            
+            if len(minute_bucket) >= self.requests_per_minute:
+                return False, f"Rate limit exceeded: {self.requests_per_minute} requests per minute"
+            
+            # Check hour limit
+            hour_bucket = self.hour_buckets[key]
+            self._clean_old_requests(hour_bucket, 3600)
+            
+            if len(hour_bucket) >= self.requests_per_hour:
+                return False, f"Rate limit exceeded: {self.requests_per_hour} requests per hour"
+            
+            # Add current request
+            minute_bucket.append(now)
+            hour_bucket.append(now)
+            
+            return True, ""
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Middleware for applying rate limits to analysis endpoints.
+    
+    Automatically applies rate limiting to configured endpoint patterns.
+    """
+    
+    def __init__(self, app, rate_limiter: RateLimiter, protected_paths: list = None):
+        """Initialize rate limit middleware.
+        
+        Args:
+            app: FastAPI application
+            rate_limiter: RateLimiter instance
+            protected_paths: List of path patterns to protect (default: analysis endpoints)
+        """
+        super().__init__(app)
+        self.rate_limiter = rate_limiter
+        self.protected_paths = protected_paths or ["/api/v1/analysis", "/api/v1/analyze"]
+    
+    async def dispatch(self, request: Request, call_next) -> Response:
+        """Process request and apply rate limiting.
+        
+        Args:
+            request: Incoming request
+            call_next: Next middleware/handler
+            
+        Returns:
+            Response from handler or rate limit error
+            
+        Raises:
+            HTTPException: If rate limit exceeded
+        """
+        # Check if path should be rate limited
+        if any(request.url.path.startswith(path) for path in self.protected_paths):
+            # Extract user_id from request (assuming it's in headers or auth)
+            user_id = request.headers.get("X-User-ID")
+            
+            if not user_id:
+                # Try to get from request state (set by auth middleware)
+                user_id = getattr(request.state, "user_id", None)
+            
+            if user_id:
+                try:
+                    user_id_int = int(user_id)
+                    allowed, message = self.rate_limiter.check_rate_limit(user_id_int)
+                    
+                    if not allowed:
+                        raise HTTPException(status_code=429, detail=message)
+                except ValueError:
+                    raise HTTPException(status_code=400, detail="Invalid user ID")
+        
         response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
-
-
-def configure_exception_handlers(app):
-    """Configure custom exception handlers that don't leak stack traces."""
-    
-    @app.exception_handler(ValidationError)
-    async def validation_exception_handler(request: Request, exc: ValidationError):
-        logger.warning(f"Validation error on {request.url.path}: {exc.errors()}")
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=ErrorResponse(
-                detail="Invalid request data",
-                error_code="VALIDATION_ERROR"
-            ).dict(),
-        )
-    
-    @app.exception_handler(SQLAlchemyError)
-    async def sqlalchemy_exception_handler(request: Request, exc: SQLAlchemyError):
-        logger.error(f"Database error on {request.url.path}: {str(exc)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                detail="Database operation failed",
-                error_code="DATABASE_ERROR"
-            ).dict(),
-        )
-    
-    @app.exception_handler(ValueError)
-    async def value_error_handler(request: Request, exc: ValueError):
-        logger.warning(f"Value error on {request.url.path}: {str(exc)}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content=ErrorResponse(
-                detail="Invalid input provided",
-                error_code="VALUE_ERROR"
-            ).dict(),
-        )
-    
-    @app.exception_handler(Exception)
-    async def general_exception_handler(request: Request, exc: Exception):
-        logger.error(f"Unhandled exception on {request.url.path}: {type(exc).__name__}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=ErrorResponse(
-                detail="An unexpected error occurred",
-                error_code="INTERNAL_ERROR"
-            ).dict(),
-        )
-
-
-def setup_security(app, allowed_origins: list = None):
-    """Setup all security middleware and exception handlers."""
-    configure_cors(app, allowed_origins)
-    app.add_middleware(SecurityHeadersMiddleware)
-    configure_exception_handlers(app)
