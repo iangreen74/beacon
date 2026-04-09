@@ -1,151 +1,107 @@
-"""Pydantic schemas for request/response validation.
+"""Pydantic schemas for request/response validation."""
 
-Provides data validation and serialization models for API endpoints,
-including custom validators for sanitization and security checks.
-"""
-
-from typing import Optional, Any
+from typing import Optional, List
 from datetime import datetime
-
-from pydantic import BaseModel, Field, field_validator, model_validator
-import bleach
+from pydantic import BaseModel, Field, EmailStr
 
 
-class SanitizedStr(str):
-    """Custom string type that sanitizes HTML/script content.
-    
-    Removes potentially dangerous HTML tags and attributes to prevent
-    XSS attacks while preserving safe formatting.
-    """
-    
-    @classmethod
-    def validate(cls, v: Any) -> str:
-        """Validate and sanitize string input.
-        
-        Args:
-            v: Input value to sanitize
-            
-        Returns:
-            Sanitized string with dangerous content removed
-            
-        Raises:
-            ValueError: If input cannot be converted to string
-        """
-        if not isinstance(v, str):
-            v = str(v)
-        
-        # Strip all HTML tags for maximum security
-        sanitized = bleach.clean(
-            v,
-            tags=[],  # No tags allowed
-            attributes={},  # No attributes allowed
-            strip=True  # Strip tags instead of escaping
-        )
-        
-        # Truncate to reasonable length (prevent DoS)
-        max_length = 10000
-        if len(sanitized) > max_length:
-            sanitized = sanitized[:max_length]
-        
-        return sanitized
+class UserBase(BaseModel):
+    """Base user schema."""
+    email: EmailStr
+    name: str
 
 
-class AnalysisRequest(BaseModel):
-    """Request model for analysis endpoints.
-    
-    Validates that user has access to the specified pulse and team,
-    and sanitizes all text inputs.
-    """
-    
-    pulse_id: int = Field(..., gt=0, description="ID of pulse to analyze")
-    team_id: Optional[int] = Field(None, gt=0, description="Team ID for filtering")
-    user_id: Optional[int] = Field(None, gt=0, description="User ID for filtering")
-    context: Optional[str] = Field(None, max_length=5000, description="Additional context")
-    current_user_id: int = Field(..., gt=0, description="Current authenticated user ID")
-    
-    @field_validator('context')
-    @classmethod
-    def sanitize_context(cls, v: Optional[str]) -> Optional[str]:
-        """Sanitize context string to prevent XSS.
-        
-        Args:
-            v: Context string to sanitize
-            
-        Returns:
-            Sanitized context or None
-        """
-        if v is None:
-            return None
-        return SanitizedStr.validate(v)
-    
-    @field_validator('team_id', 'user_id', 'pulse_id')
-    @classmethod
-    def validate_positive_ids(cls, v: Optional[int]) -> Optional[int]:
-        """Validate IDs are positive integers to prevent SQL injection.
-        
-        Args:
-            v: ID value to validate
-            
-        Returns:
-            Validated ID
-            
-        Raises:
-            ValueError: If ID is not positive
-        """
-        if v is not None and v <= 0:
-            raise ValueError("ID must be a positive integer")
-        return v
-    
-    @model_validator(mode='after')
-    def validate_pulse_ownership(self) -> 'AnalysisRequest':
-        """Validate user has access to pulse and team.
-        
-        This validator checks ownership/membership but requires database access.
-        Actual validation is performed in the endpoint handler with database session.
-        This serves as a placeholder for the validation logic structure.
-        
-        Returns:
-            Self for chaining
-        """
-        # Note: Actual database validation must happen in endpoint handler
-        # where database session is available. This validates the structure.
-        return self
+class UserCreate(UserBase):
+    """Schema for creating a user."""
+    password: str
 
 
-class AnalysisResponse(BaseModel):
-    """Response model for analysis results."""
-    
-    analysis_id: int = Field(..., description="Unique analysis identifier")
-    pulse_id: int = Field(..., description="Associated pulse ID")
-    insights: str = Field(..., description="Generated insights")
-    confidence_score: float = Field(..., ge=0.0, le=1.0, description="Confidence score")
-    created_at: datetime = Field(..., description="Analysis timestamp")
-    
+class UserResponse(UserBase):
+    """Schema for user response."""
+    id: int
+    created_at: datetime
+
     class Config:
-        """Pydantic model configuration."""
         from_attributes = True
 
 
-class TeamAccessRequest(BaseModel):
-    """Request model for team access validation."""
-    
-    team_id: int = Field(..., gt=0, description="Team ID to validate")
-    user_id: int = Field(..., gt=0, description="User ID to check")
-    
-    @field_validator('team_id', 'user_id')
-    @classmethod
-    def validate_ids(cls, v: int) -> int:
-        """Validate IDs are positive integers.
-        
-        Args:
-            v: ID value
-            
-        Returns:
-            Validated ID
-            
-        Raises:
-            ValueError: If ID is invalid
-        """
-        if v <= 0:
-            raise ValueError("ID must be a positive integer")
-        return v
+class TeamBase(BaseModel):
+    """Base team schema."""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class TeamCreate(TeamBase):
+    """Schema for creating a team."""
+    pass
+
+
+class TeamUpdate(BaseModel):
+    """Schema for updating a team."""
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+
+
+class TeamResponse(TeamBase):
+    """Schema for team response."""
+    id: int
+    owner_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class TeamMemberResponse(BaseModel):
+    """Schema for team member response."""
+    id: int
+    email: EmailStr
+    name: str
+
+    class Config:
+        from_attributes = True
+
+
+class PaginatedTeamMembers(BaseModel):
+    """Schema for paginated team members."""
+    members: List[TeamMemberResponse]
+    total: int
+    skip: int
+    limit: int
+
+
+class PulseBase(BaseModel):
+    """Base pulse schema."""
+    sentiment_score: int = Field(..., ge=1, le=5)
+    comment: Optional[str] = Field(None, max_length=1000)
+
+
+class PulseCreate(PulseBase):
+    """Schema for creating a pulse."""
+    team_id: int
+
+
+class PulseResponse(PulseBase):
+    """Schema for pulse response."""
+    id: int
+    user_id: int
+    team_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class HealthResponse(BaseModel):
+    """Schema for health check response."""
+    status: str
+    database: str
+    timestamp: datetime
+
+
+class MetricsResponse(BaseModel):
+    """Schema for metrics response."""
+    total_pulses: int
+    total_teams: int
+    total_users: int
+    average_sentiment: float
