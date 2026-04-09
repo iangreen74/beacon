@@ -1,60 +1,89 @@
-"""Database models for pulse tracking and team management."""
+"""Database models for team pulse application."""
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Index
-from sqlalchemy.orm import relationship, declarative_base
 
-Base = declarative_base()
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, JSON
+from sqlalchemy.orm import relationship
 
-
-class Team(Base):
-    """Team entity for organizing users and pulses."""
-    
-    __tablename__ = "teams"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
-    users = relationship("User", back_populates="team")
-    pulses = relationship("Pulse", back_populates="team")
+from app.database import Base
 
 
 class User(Base):
-    """User entity with team membership."""
-    
+    """User model for authentication and authorization."""
+
     __tablename__ = "users"
-    
+
     id = Column(Integer, primary_key=True, index=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
-    name = Column(String(255), nullable=False)
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
-    
-    team = relationship("Team", back_populates="users")
+    email = Column(String(255), unique=True, index=True, nullable=False)
+    hashed_password = Column(String(255), nullable=False)
+    full_name = Column(String(255))
+    is_active = Column(Integer, default=1)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    team_memberships = relationship("TeamMember", back_populates="user")
     pulses = relationship("Pulse", back_populates="user")
 
 
-class Pulse(Base):
-    """Pulse submission tracking mood and feedback."""
-    
-    __tablename__ = "pulses"
-    
+class Team(Base):
+    """Team model for organizing users."""
+
+    __tablename__ = "teams"
+
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
-    mood_score = Column(Float, nullable=False)
-    feedback_text = Column(Text, nullable=True)
-    metadata = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-    
-    user = relationship("User", back_populates="pulses")
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    members = relationship("TeamMember", back_populates="team")
+    pulses = relationship("Pulse", back_populates="team")
+    analyses = relationship("Analysis", back_populates="team")
+
+
+class TeamMember(Base):
+    """Team membership association."""
+
+    __tablename__ = "team_members"
+
+    id = Column(Integer, primary_key=True, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    role = Column(String(50), default="member")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    team = relationship("Team", back_populates="members")
+    user = relationship("User", back_populates="team_memberships")
+
+
+class Pulse(Base):
+    """Pulse submission model for tracking team sentiment."""
+
+    __tablename__ = "pulses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    mood = Column(String(50), nullable=False)
+    energy_level = Column(Integer, nullable=False)
+    comment = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
     team = relationship("Team", back_populates="pulses")
-    
-    __table_args__ = (
-        Index("idx_pulses_team_created", "team_id", "created_at"),
-        Index("idx_pulses_user_created", "user_id", "created_at"),
-    )
+    user = relationship("User", back_populates="pulses")
+
+
+class Analysis(Base):
+    """AI analysis results for team sentiment."""
+
+    __tablename__ = "analyses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    sentiment_score = Column(Float, nullable=False)
+    summary = Column(Text, nullable=False)
+    recommendations = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    team = relationship("Team", back_populates="analyses")
