@@ -1,0 +1,127 @@
+{
+  "info": {
+    "name": "Team Pulse API",
+    "description": "Complete API collection for Team Pulse sentiment tracking platform",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "1.0.0"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "your-api-key-here",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{api_key}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Pulses",
+      "item": [
+        {
+          "name": "Submit Pulse",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sentiment\": 4,\n  \"comment\": \"Great day!\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/pulses",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "pulses"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Pulse Trends",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/pulses/trends?days=7",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "pulses", "trends"],
+              "query": [{"key": "days", "value": "7"}]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Teams",
+      "item": [
+        {
+          "name": "Create Team",
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Engineering Team\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/teams",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "teams"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Team Details",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/teams/:team_id",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "teams", ":team_id"],
+              "variable": [{"key": "team_id", "value": "team-uuid-here"}]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
