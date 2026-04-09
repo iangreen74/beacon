@@ -1,172 +1,175 @@
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Any
+"""AI analysis engine for sentiment and trend detection."""
+
+import logging
 import os
-import json
-import asyncio
+import time
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
-from anthropic import AsyncAnthropic
-import openai
-from openai import AsyncOpenAI
-import redis.asyncio as redis
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
-from app.database import get_db
-from app.models import PulseResponse
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
+from sqlalchemy.orm import Session
+
+from app.models import Pulse, Analysis
+from app.schemas import AnalysisResult
+
+logger = logging.getLogger(__name__)
 
 
-class AIProvider(str, Enum):
+class AnalysisProvider(str, Enum):
+    """Available AI analysis providers."""
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
 
 
-class AIAnalysisEngine:
-    def __init__(self):
-        self.provider = os.getenv("AI_PROVIDER", "openai")
-        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        self.redis_client = None
-        self.cache_ttl = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
-        self.timeout = int(os.getenv("AI_TIMEOUT_SECONDS", "30"))
+class CircuitBreaker:
+    """Circuit breaker to prevent cascading failures."""
 
-    async def initialize_redis(self):
-        if not self.redis_client:
-            redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-            self.redis_client = await redis.from_url(redis_url, decode_responses=True)
+    def __init__(self, failure_threshold: int = 5, timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout
+        self.failures = 0
+        self.last_failure_time = 0
+        self.is_open = False
 
-    async def close(self):
-        if self.redis_client:
-            await self.redis_client.close()
-
-    def _build_analysis_prompt(self, responses: List[Dict[str, Any]]) -> str:
-        responses_text = "\n\n".join([
-            f"Response {i+1}:\nQuestion: {r['question']}\nAnswer: {r['answer']}\nUser: {r['user_id']}"
-            for i, r in enumerate(responses)
-        ])
-        
-        return f"""Analyze the following pulse responses from a team. Provide a structured analysis.
-
-{responses_text}
-
-Provide your analysis in JSON format with these keys:
-- sentiment: overall sentiment (positive/neutral/negative)
-- sentiment_score: numerical score from -1.0 to 1.0
-- themes: array of identified themes/topics
-- blockers: array of identified blockers or issues
-- insights: array of key insights or observations
-- summary: brief summary (2-3 sentences)
-
-Respond with valid JSON only."""
-
-    async def _get_cache_key(self, pulse_id: str) -> str:
-        return f"ai_analysis:{pulse_id}"
-
-    async def _get_from_cache(self, cache_key: str) -> Optional[Dict[str, Any]]:
-        await self.initialize_redis()
-        try:
-            cached = await self.redis_client.get(cache_key)
-            if cached:
-                return json.loads(cached)
-        except Exception:
-            pass
-        return None
-
-    async def _set_cache(self, cache_key: str, data: Dict[str, Any]):
-        await self.initialize_redis()
-        try:
-            await self.redis_client.setex(
-                cache_key,
-                self.cache_ttl,
-                json.dumps(data)
-            )
-        except Exception:
-            pass
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((openai.APIError, openai.APITimeoutError))
-    )
-    async def _call_openai(self, prompt: str) -> str:
-        response = await asyncio.wait_for(
-            self.openai_client.chat.completions.create(
-                model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=1000
-            ),
-            timeout=self.timeout
-        )
-        return response.choices[0].message.content
-
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10)
-    )
-    async def _call_anthropic(self, prompt: str) -> str:
-        response = await asyncio.wait_for(
-            self.anthropic_client.messages.create(
-                model=os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"),
-                max_tokens=1000,
-                temperature=0.3,
-                messages=[{"role": "user", "content": prompt}]
-            ),
-            timeout=self.timeout
-        )
-        return response.content[0].text
-
-    async def _fallback_analysis(self, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
-        return {
-            "sentiment": "neutral",
-            "sentiment_score": 0.0,
-            "themes": ["Unable to analyze"],
-            "blockers": [],
-            "insights": ["AI analysis temporarily unavailable"],
-            "summary": f"Analysis unavailable for {len(responses)} responses.",
-            "fallback": True
-        }
-
-    async def analyze_pulse_responses(self, pulse_id: str, responses: List[Dict[str, Any]]) -> Dict[str, Any]:
-        cache_key = await self._get_cache_key(pulse_id)
-        cached_result = await self._get_from_cache(cache_key)
-        if cached_result:
-            return cached_result
-
-        if not responses:
-            return await self._fallback_analysis(responses)
-
-        prompt = self._build_analysis_prompt(responses)
-        
-        try:
-            if self.provider == AIProvider.ANTHROPIC:
-                response_text = await self._call_anthropic(prompt)
+    def call(self, func, *args, **kwargs):
+        if self.is_open:
+            if time.time() - self.last_failure_time > self.timeout:
+                self.is_open = False
+                self.failures = 0
             else:
-                response_text = await self._call_openai(prompt)
-            
-            analysis = json.loads(response_text)
-            analysis["analyzed_at"] = datetime.utcnow().isoformat()
-            analysis["pulse_id"] = pulse_id
-            analysis["response_count"] = len(responses)
-            
-            await self._set_cache(cache_key, analysis)
-            await self._store_analysis(pulse_id, analysis)
-            
-            return analysis
-            
-        except Exception:
-            fallback = await self._fallback_analysis(responses)
-            await self._store_analysis(pulse_id, fallback)
-            return fallback
+                raise Exception("Circuit breaker is open")
 
-    async def _store_analysis(self, pulse_id: str, analysis: Dict[str, Any]):
-        async with get_db() as db:
-            await db.execute(
-                """INSERT INTO pulse_analyses (pulse_id, analysis_data, created_at)
-                   VALUES (?, ?, ?) ON CONFLICT(pulse_id) DO UPDATE SET
-                   analysis_data = excluded.analysis_data, updated_at = ?""",
-                (pulse_id, json.dumps(analysis), datetime.utcnow(), datetime.utcnow())
-            )
-            await db.commit()
+        try:
+            result = func(*args, **kwargs)
+            self.failures = 0
+            return result
+        except Exception as e:
+            self.failures += 1
+            self.last_failure_time = time.time()
+            if self.failures >= self.failure_threshold:
+                self.is_open = True
+            raise e
 
 
-ai_engine = AIAnalysisEngine()
+class RateLimiter:
+    """Rate limiter for API calls per user/team."""
+
+    def __init__(self, max_requests: int = 100, window_seconds: int = 3600):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: Dict[str, List[float]] = {}
+
+    def check_limit(self, key: str) -> bool:
+        now = time.time()
+        if key not in self.requests:
+            self.requests[key] = []
+
+        self.requests[key] = [ts for ts in self.requests[key] if now - ts < self.window_seconds]
+
+        if len(self.requests[key]) >= self.max_requests:
+            return False
+
+        self.requests[key].append(now)
+        return True
+
+
+class AIAnalysisEngine:
+    """Engine for analyzing team sentiment using AI providers."""
+
+    SENTIMENT_PROMPT = """Analyze the following team sentiment data and provide insights.
+
+Pulse responses:
+{pulses}
+
+Provide a brief analysis focusing on:
+1. Overall sentiment trends
+2. Key concerns or positive patterns
+3. Recommended actions
+
+Keep the response concise and actionable."""
+
+    def __init__(self, provider: AnalysisProvider = AnalysisProvider.OPENAI):
+        self.provider = provider
+        self.circuit_breaker = CircuitBreaker()
+        self.rate_limiter = RateLimiter()
+        self._validate_api_keys()
+
+    def _validate_api_keys(self) -> None:
+        """Validate API keys at startup."""
+        if self.provider == AnalysisProvider.OPENAI:
+            if not OPENAI_AVAILABLE:
+                raise ImportError("openai package not installed")
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OPENAI_API_KEY not set")
+            openai.api_key = api_key
+        elif self.provider == AnalysisProvider.ANTHROPIC:
+            if not ANTHROPIC_AVAILABLE:
+                raise ImportError("anthropic package not installed")
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                raise ValueError("ANTHROPIC_API_KEY not set")
+
+    def analyze_team_sentiment(self, team_id: int, db: Session) -> AnalysisResult:
+        """Analyze sentiment for a team."""
+        rate_key = f"team:{team_id}"
+        if not self.rate_limiter.check_limit(rate_key):
+            raise Exception("Rate limit exceeded for team")
+
+        pulses = db.query(Pulse).filter(Pulse.team_id == team_id).order_by(Pulse.created_at.desc()).limit(50).all()
+
+        if not pulses:
+            return AnalysisResult(sentiment_score=0.0, summary="No data available", recommendations=[])
+
+        pulse_text = "\n".join([f"- Mood: {p.mood}, Energy: {p.energy_level}, Comment: {p.comment or 'N/A'}" for p in pulses])
+        prompt = self.SENTIMENT_PROMPT.format(pulses=pulse_text)
+
+        analysis_text = self.circuit_breaker.call(self._call_ai_api, prompt)
+        result = self._parse_analysis(analysis_text)
+
+        analysis_record = Analysis(team_id=team_id, sentiment_score=result.sentiment_score, summary=result.summary, recommendations=result.recommendations)
+        db.add(analysis_record)
+        db.commit()
+
+        return result
+
+    def _call_ai_api(self, prompt: str) -> str:
+        """Call the configured AI API."""
+        if self.provider == AnalysisProvider.OPENAI:
+            response = openai.ChatCompletion.create(model="gpt-4", messages=[{"role": "user", "content": prompt}], temperature=0.7, max_tokens=500)
+            return response.choices[0].message.content
+        elif self.provider == AnalysisProvider.ANTHROPIC:
+            client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+            response = client.messages.create(model="claude-3-sonnet-20240229", max_tokens=500, messages=[{"role": "user", "content": prompt}])
+            return response.content[0].text
+        raise ValueError(f"Unsupported provider: {self.provider}")
+
+    def _parse_analysis(self, text: str) -> AnalysisResult:
+        """Parse AI analysis response."""
+        lines = text.strip().split("\n")
+        sentiment_score = 0.5
+        summary = ""
+        recommendations = []
+
+        for line in lines:
+            if "positive" in line.lower():
+                sentiment_score = 0.7
+            elif "negative" in line.lower() or "concern" in line.lower():
+                sentiment_score = 0.3
+            if line.strip().startswith("-") or line.strip().startswith("•"):
+                recommendations.append(line.strip().lstrip("-•").strip())
+
+        summary = " ".join([l for l in lines if l.strip() and not l.strip().startswith(("-", "•"))])[:200]
+
+        return AnalysisResult(sentiment_score=sentiment_score, summary=summary, recommendations=recommendations[:3])
