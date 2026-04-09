@@ -1,103 +1,60 @@
+"""Database models for pulse tracking and team management."""
+
 from datetime import datetime
-from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Float, Index
+from sqlalchemy.orm import relationship, declarative_base
+
+Base = declarative_base()
 
 
-class TeamRole(str, Enum):
-    ADMIN = "admin"
-    MEMBER = "member"
+class Team(Base):
+    """Team entity for organizing users and pulses."""
+    
+    __tablename__ = "teams"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    users = relationship("User", back_populates="team")
+    pulses = relationship("Pulse", back_populates="team")
 
 
-class InvitationStatus(str, Enum):
-    PENDING = "pending"
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
+class User(Base):
+    """User entity with team membership."""
+    
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    team = relationship("Team", back_populates="users")
+    pulses = relationship("Pulse", back_populates="user")
 
 
-class TeamBase(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    description: Optional[str] = Field(None, max_length=500)
-
-    @field_validator('name')
-    @classmethod
-    def sanitize_name(cls, v: str) -> str:
-        return v.strip()
-
-    @field_validator('description')
-    @classmethod
-    def sanitize_description(cls, v: Optional[str]) -> Optional[str]:
-        return v.strip() if v else None
-
-
-class TeamCreate(TeamBase):
-    pass
-
-
-class TeamUpdate(BaseModel):
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    description: Optional[str] = Field(None, max_length=500)
-
-    @field_validator('name')
-    @classmethod
-    def sanitize_name(cls, v: Optional[str]) -> Optional[str]:
-        return v.strip() if v else None
-
-    @field_validator('description')
-    @classmethod
-    def sanitize_description(cls, v: Optional[str]) -> Optional[str]:
-        return v.strip() if v else None
-
-
-class Team(TeamBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    owner_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class TeamMemberBase(BaseModel):
-    user_id: str
-    role: TeamRole = TeamRole.MEMBER
-
-
-class TeamMemberCreate(TeamMemberBase):
-    pass
-
-
-class TeamMemberUpdate(BaseModel):
-    role: TeamRole
-
-
-class TeamMember(TeamMemberBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    team_id: str
-    added_at: datetime
-
-
-class InvitationBase(BaseModel):
-    email: str = Field(..., pattern=r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-    role: TeamRole = TeamRole.MEMBER
-
-    @field_validator('email')
-    @classmethod
-    def sanitize_email(cls, v: str) -> str:
-        return v.strip().lower()
-
-
-class InvitationCreate(InvitationBase):
-    pass
-
-
-class Invitation(InvitationBase):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    team_id: str
-    invited_by: str
-    status: InvitationStatus
-    created_at: datetime
-    expires_at: datetime
+class Pulse(Base):
+    """Pulse submission tracking mood and feedback."""
+    
+    __tablename__ = "pulses"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True, index=True)
+    mood_score = Column(Float, nullable=False)
+    feedback_text = Column(Text, nullable=True)
+    metadata = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    
+    user = relationship("User", back_populates="pulses")
+    team = relationship("Team", back_populates="pulses")
+    
+    __table_args__ = (
+        Index("idx_pulses_team_created", "team_id", "created_at"),
+        Index("idx_pulses_user_created", "user_id", "created_at"),
+    )
