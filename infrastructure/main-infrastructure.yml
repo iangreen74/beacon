@@ -1,0 +1,31 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Infrastructure for main
+Resources:
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: main
+      ImageScanningConfiguration:
+        ScanOnPush: true
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: main-cluster
+  LogGroup:
+    Type: AWS::CloudWatch::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/main
+      RetentionInDays: 30
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: main-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
