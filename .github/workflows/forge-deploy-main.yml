@@ -1,28 +1,11 @@
+# Deployment managed by ForgeScaler via CodeBuild.
+# This workflow is a manual fallback — automatic deploys happen
+# through the ForgeScaler platform when PRs merge.
 name: Deploy main
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
-permissions:
-  contents: read
 jobs:
-  deploy:
+  info:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-      - name: Build and deploy
-        run: |
-          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 418295677815.dkr.ecr.us-east-1.amazonaws.com
-          docker build -t 418295677815.dkr.ecr.us-east-1.amazonaws.com/forgescaler-forge-1dba414:${{ github.sha }} .
-          docker tag 418295677815.dkr.ecr.us-east-1.amazonaws.com/forgescaler-forge-1dba414:${{ github.sha }} 418295677815.dkr.ecr.us-east-1.amazonaws.com/forgescaler-forge-1dba414:latest
-          docker push 418295677815.dkr.ecr.us-east-1.amazonaws.com/forgescaler-forge-1dba414:${{ github.sha }}
-          docker push 418295677815.dkr.ecr.us-east-1.amazonaws.com/forgescaler-forge-1dba414:latest
-      - name: Deploy to ECS
-        run: |
-          aws ecs update-service --cluster forgescaler-forge-1dba414-cluster --service forgescaler-forge-1dba414 --force-new-deployment --region us-east-1
+      - run: echo "Deployment is managed by ForgeScaler. Merging to main auto-deploys."
