@@ -1,3 +1,4 @@
+"""Monitoring and metrics endpoints for Beacon platform."""
 import os
 import psutil
 from typing import Dict, Any
@@ -26,106 +27,45 @@ http_request_duration_seconds = Histogram(
     ["method", "endpoint"]
 )
 
-db_connection_pool_size = Gauge(
-    "db_connection_pool_size",
-    "Current database connection pool size"
+active_connections = Gauge(
+    "active_connections",
+    "Number of active database connections"
 )
 
-active_users_gauge = Gauge(
-    "active_users",
-    "Number of active users"
+db_query_duration = Histogram(
+    "db_query_duration_seconds",
+    "Database query duration in seconds",
+    ["query_type"]
 )
-
-memory_usage_bytes = Gauge(
-    "memory_usage_bytes",
-    "Current memory usage in bytes"
-)
-
-cpu_usage_percent = Gauge(
-    "cpu_usage_percent",
-    "Current CPU usage percentage"
-)
-
-
-@router.get("/health")
-async def health_check() -> Dict[str, Any]:
-    """Basic health check endpoint."""
-    return {
-        "status": "healthy",
-        "service": "pulse-analyzer",
-        "version": "1.0.0"
-    }
-
-
-@router.get("/health/live")
-async def liveness_probe() -> Dict[str, str]:
-    """Kubernetes liveness probe."""
-    return {"status": "alive"}
-
-
-@router.get("/health/ready")
-async def readiness_probe() -> Dict[str, Any]:
-    """Kubernetes readiness probe with database check."""
-    try:
-        db = next(get_db())
-        db.execute(text("SELECT 1"))
-        db_status = "connected"
-        db_healthy = True
-    except Exception as e:
-        logger.error(f"Database health check failed: {str(e)}")
-        db_status = "disconnected"
-        db_healthy = False
-    
-    return {
-        "status": "ready" if db_healthy else "not_ready",
-        "database": db_status,
-    }
-
-
-@router.get("/health/detailed")
-async def detailed_health_check() -> Dict[str, Any]:
-    """Detailed health check with system metrics."""
-    process = psutil.Process(os.getpid())
-    memory_info = process.memory_info()
-    
-    memory_usage_bytes.set(memory_info.rss)
-    cpu_usage_percent.set(process.cpu_percent())
-    
-    try:
-        db = next(get_db())
-        db.execute(text("SELECT 1"))
-        db_status = "connected"
-    except Exception as e:
-        logger.error(f"Database connection check failed: {str(e)}")
-        db_status = "disconnected"
-    
-    return {
-        "status": "healthy",
-        "database": db_status,
-        "system": {
-            "memory_usage_mb": round(memory_info.rss / 1024 / 1024, 2),
-            "cpu_percent": process.cpu_percent(),
-            "threads": process.num_threads(),
-        },
-        "service": {
-            "name": "pulse-analyzer",
-            "version": "1.0.0",
-        }
-    }
 
 
 @router.get("/metrics")
-async def metrics() -> Response:
-    """Prometheus metrics endpoint."""
-    process = psutil.Process(os.getpid())
-    memory_info = process.memory_info()
-    
-    memory_usage_bytes.set(memory_info.rss)
-    cpu_usage_percent.set(process.cpu_percent())
-    
-    metrics_output = generate_latest()
-    
-    return Response(
-        content=metrics_output,
-        media_type=CONTENT_TYPE_LATEST
-    )
+def metrics():
+    """Prometheus metrics endpoint for Beacon platform."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+@router.get("/health")
+def health_check():
+    """Health check endpoint for Beacon platform."""
+    try:
+        db = next(get_db())
+        db.execute(text("SELECT 1"))
+        db_status = "healthy"
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        db_status = "unhealthy"
+
+    cpu_percent = psutil.cpu_percent(interval=1)
+    memory = psutil.virtual_memory()
+
+    return {
+        "status": "healthy" if db_status == "healthy" else "degraded",
+        "service": "beacon",
+        "database": db_status,
+        "system": {
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "memory_available_mb": memory.available / (1024 * 1024)
+        }
+    }
