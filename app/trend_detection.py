@@ -1,166 +1,108 @@
 from datetime import datetime, timedelta
-from typing import List, Dict, Any, Optional
-from collections import defaultdict
-import statistics
+from typing import List, Dict, Any
 
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Pulse, TrendAlert
-from app.database import get_db
+from app.models import Metric, Trend
 
 
-class TrendDetector:
-    """Detect trends and anomalies in pulse data for team health monitoring."""
-    
-    def __init__(self, db: Session):
+class TrendDetectionService:
+    """Service for detecting and analyzing trends in metrics."""
+
+    def __init__(self, db: AsyncSession):
         self.db = db
-        self.health_threshold = 0.3
-        self.anomaly_std_threshold = 2.0
-        self.blocker_frequency_threshold = 0.4
-    
-    def analyze_team_health_trend(self, team_id: str, days: int = 14) -> Dict[str, Any]:
-        """Detect deteriorating team health trends over time."""
+
+    async def detect_trends(
+        self,
+        metric_name: str,
+        days: int = 7,
+        threshold: float = 0.1
+    ) -> Dict[str, Any]:
+        """Detect trends in a specific metric over a time period."""
         cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
-        pulses = self.db.query(Pulse).filter(
-            and_(
-                Pulse.team_id == team_id,
-                Pulse.timestamp >= cutoff_date
-            )
-        ).order_by(Pulse.timestamp.asc()).all()
-        
-        if len(pulses) < 3:
-            return {"status": "insufficient_data", "trend": None}
-        
-        # Calculate daily average health scores
-        daily_scores = defaultdict(list)
-        for pulse in pulses:
-            date_key = pulse.timestamp.date()
-            daily_scores[date_key].append(pulse.health_score)
-        
-        sorted_dates = sorted(daily_scores.keys())
-        scores = [statistics.mean(daily_scores[date]) for date in sorted_dates]
-        
-        # Detect deterioration using moving average
-        if len(scores) >= 7:
-            recent_avg = statistics.mean(scores[-7:])
-            earlier_avg = statistics.mean(scores[:7])
-            decline_rate = (earlier_avg - recent_avg) / earlier_avg if earlier_avg > 0 else 0
-            
-            if decline_rate > self.health_threshold:
-                self._create_alert(
-                    team_id=team_id,
-                    alert_type="health_deterioration",
-                    severity="high",
-                    message=f"Team health declined {decline_rate:.1%} over {days} days",
-                    metadata={"decline_rate": decline_rate, "recent_avg": recent_avg}
-                )
-                return {"status": "deteriorating", "trend": decline_rate, "current_score": recent_avg}
-        
-        return {"status": "stable", "trend": 0.0, "current_score": scores[-1] if scores else 0}
-    
-    def detect_blocker_patterns(self, team_id: str, days: int = 30) -> Dict[str, Any]:
-        """Identify recurring blocker patterns in team pulses."""
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
-        pulses = self.db.query(Pulse).filter(
-            and_(
-                Pulse.team_id == team_id,
-                Pulse.timestamp >= cutoff_date,
-                Pulse.has_blockers == True
-            )
-        ).all()
-        
-        if not pulses:
-            return {"patterns": [], "frequency": 0.0}
-        
-        # Extract and categorize blockers
-        blocker_keywords = defaultdict(int)
-        total_pulses = self.db.query(func.count(Pulse.id)).filter(
-            and_(Pulse.team_id == team_id, Pulse.timestamp >= cutoff_date)
-        ).scalar()
-        
-        for pulse in pulses:
-            if pulse.blockers:
-                words = pulse.blockers.lower().split()
-                for word in words:
-                    if len(word) > 4:
-                        blocker_keywords[word] += 1
-        
-        # Find recurring patterns
-        patterns = [
-            {"keyword": keyword, "count": count}
-            for keyword, count in sorted(blocker_keywords.items(), key=lambda x: x[1], reverse=True)[:5]
-            if count >= 3
-        ]
-        
-        blocker_frequency = len(pulses) / total_pulses if total_pulses > 0 else 0
-        
-        if blocker_frequency > self.blocker_frequency_threshold and patterns:
-            self._create_alert(
-                team_id=team_id,
-                alert_type="recurring_blockers",
-                severity="medium",
-                message=f"Blockers present in {blocker_frequency:.1%} of pulses",
-                metadata={"patterns": patterns, "frequency": blocker_frequency}
-            )
-        
-        return {"patterns": patterns, "frequency": blocker_frequency}
-    
-    def detect_anomalies(self, team_id: str, days: int = 30) -> List[Dict[str, Any]]:
-        """Detect anomalous pulse data points using statistical analysis."""
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-        
-        pulses = self.db.query(Pulse).filter(
-            and_(
-                Pulse.team_id == team_id,
-                Pulse.timestamp >= cutoff_date
-            )
-        ).all()
-        
-        if len(pulses) < 10:
-            return []
-        
-        scores = [p.health_score for p in pulses]
-        mean_score = statistics.mean(scores)
-        std_dev = statistics.stdev(scores)
-        
-        anomalies = []
-        for pulse in pulses:
-            z_score = abs((pulse.health_score - mean_score) / std_dev) if std_dev > 0 else 0
-            
-            if z_score > self.anomaly_std_threshold:
-                anomalies.append({
-                    "pulse_id": pulse.id,
-                    "user_id": pulse.user_id,
-                    "timestamp": pulse.timestamp.isoformat(),
-                    "health_score": pulse.health_score,
-                    "z_score": z_score,
-                    "deviation": pulse.health_score - mean_score
-                })
-        
-        if anomalies:
-            self._create_alert(
-                team_id=team_id,
-                alert_type="anomaly_detected",
-                severity="medium",
-                message=f"Detected {len(anomalies)} anomalous pulse(s)",
-                metadata={"anomalies": anomalies[:5]}
-            )
-        
-        return anomalies
-    
-    def _create_alert(self, team_id: str, alert_type: str, severity: str, message: str, metadata: Dict[str, Any]):
-        """Create and store a trend alert."""
-        alert = TrendAlert(
-            team_id=team_id,
-            alert_type=alert_type,
-            severity=severity,
-            message=message,
-            metadata=metadata,
-            timestamp=datetime.utcnow(),
-            acknowledged=False
+        query = select(Metric).where(
+            Metric.name == metric_name,
+            Metric.timestamp >= cutoff_date
+        ).order_by(Metric.timestamp.asc())
+        result = await self.db.execute(query)
+        metrics = list(result.scalars().all())
+
+        if len(metrics) < 2:
+            return {"trend": "insufficient_data", "metrics_count": len(metrics)}
+
+        values = [m.value for m in metrics]
+        first_half = values[:len(values)//2]
+        second_half = values[len(values)//2:]
+
+        avg_first = sum(first_half) / len(first_half)
+        avg_second = sum(second_half) / len(second_half)
+
+        if avg_first == 0:
+            return {"trend": "no_baseline", "metrics_count": len(metrics)}
+
+        change = (avg_second - avg_first) / avg_first
+
+        if change > threshold:
+            trend = "increasing"
+        elif change < -threshold:
+            trend = "decreasing"
+        else:
+            trend = "stable"
+
+        return {
+            "trend": trend,
+            "change_percentage": round(change * 100, 2),
+            "metrics_count": len(metrics),
+            "avg_first_period": round(avg_first, 2),
+            "avg_second_period": round(avg_second, 2)
+        }
+
+    async def save_trend(
+        self,
+        metric_name: str,
+        trend_type: str,
+        change_percentage: float,
+        metadata: Dict[str, Any]
+    ) -> Trend:
+        """Save detected trend to database."""
+        trend = Trend(
+            metric_name=metric_name,
+            trend_type=trend_type,
+            change_percentage=change_percentage,
+            detected_at=datetime.utcnow(),
+            metadata=metadata
         )
-        self.db.add(alert)
-        self.db.commit()
+        self.db.add(trend)
+        await self.db.commit()
+        await self.db.refresh(trend)
+        return trend
+
+    async def get_recent_trends(
+        self,
+        days: int = 7,
+        limit: int = 20
+    ) -> List[Trend]:
+        """Get recent trends."""
+        cutoff_date = datetime.utcnow() - timedelta(days=days)
+        query = select(Trend).where(
+            Trend.detected_at >= cutoff_date
+        ).order_by(Trend.detected_at.desc()).limit(limit)
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+
+    async def analyze_all_metrics(self, days: int = 7) -> List[Dict[str, Any]]:
+        """Analyze trends for all unique metrics."""
+        query = select(Metric.name).distinct()
+        result = await self.db.execute(query)
+        metric_names = result.scalars().all()
+
+        trends = []
+        for metric_name in metric_names:
+            trend_data = await self.detect_trends(metric_name, days)
+            if trend_data["trend"] not in ["insufficient_data", "no_baseline"]:
+                trends.append({
+                    "metric_name": metric_name,
+                    **trend_data
+                })
+        return trends

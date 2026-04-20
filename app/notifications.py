@@ -1,97 +1,108 @@
-from datetime import datetime, timedelta
-from typing import List
-from sqlalchemy.orm import Session
-from app.database import get_db
-from app.models import PulseSchedule, Team, User, PulseResponse
-import logging
+from datetime import datetime
+from typing import List, Optional
 
-logger = logging.getLogger(__name__)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Notification, User
+from app.schemas import NotificationCreate
 
 
 class NotificationService:
-    """Service for sending pulse reminder notifications"""
-    
-    @staticmethod
-    def get_pending_reminders(db: Session) -> List[PulseSchedule]:
-        """Get schedules that need reminders sent"""
-        now = datetime.utcnow()
-        current_time = now.strftime("%H:%M")
-        current_day = now.weekday()
-        
-        schedules = db.query(PulseSchedule).filter(
-            PulseSchedule.enabled == True,
-            PulseSchedule.trigger_time == current_time
-        ).all()
-        
-        pending = []
-        for schedule in schedules:
-            # Check if schedule should trigger today
-            if schedule.frequency == "daily":
-                pending.append(schedule)
-            elif schedule.frequency == "weekly" and current_day == 0:  # Monday
-                pending.append(schedule)
-            elif schedule.frequency == "biweekly":
-                # Check if it's been 14 days since last reminder
-                if schedule.last_triggered:
-                    days_since = (now - schedule.last_triggered).days
-                    if days_since >= 14:
-                        pending.append(schedule)
-                else:
-                    pending.append(schedule)
-        
-        return pending
-    
-    @staticmethod
-    def send_reminder(team: Team, db: Session) -> dict:
-        """Send reminder to team members who haven't submitted pulse today"""
-        today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-        
-        # Get members who haven't responded today
-        responded_user_ids = db.query(PulseResponse.user_id).filter(
-            PulseResponse.team_id == team.id,
-            PulseResponse.created_at >= today_start
-        ).distinct().all()
-        
-        responded_ids = {uid[0] for uid in responded_user_ids}
-        pending_members = [m for m in team.members if m.id not in responded_ids]
-        
-        # In production, integrate with email/slack/etc
-        notifications_sent = []
-        for member in pending_members:
-            notification = {
-                "user_id": member.id,
-                "email": member.email,
-                "team_name": team.name,
-                "message": f"Reminder: Please submit your pulse for {team.name}",
-                "timestamp": datetime.utcnow()
-            }
-            notifications_sent.append(notification)
-            logger.info(f"Reminder sent to {member.email} for team {team.name}")
-        
-        return {
-            "team_id": team.id,
-            "notifications_sent": len(notifications_sent),
-            "pending_members": len(pending_members)
-        }
-    
-    @staticmethod
-    def process_scheduled_reminders(db: Session) -> dict:
-        """Process all pending pulse reminders"""
-        pending_schedules = NotificationService.get_pending_reminders(db)
-        results = []
-        
-        for schedule in pending_schedules:
-            team = db.query(Team).filter(Team.id == schedule.team_id).first()
-            if team:
-                result = NotificationService.send_reminder(team, db)
-                results.append(result)
-                
-                # Update last triggered timestamp
-                schedule.last_triggered = datetime.utcnow()
-                db.commit()
-        
-        return {
-            "processed_schedules": len(pending_schedules),
-            "results": results,
-            "timestamp": datetime.utcnow()
-        }
+    """Service for managing user notifications."""
+
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def create_notification(
+        self,
+        user_id: int,
+        notification_data: NotificationCreate
+    ) -> Notification:
+        """Create a new notification for a user."""
+        notification = Notification(
+            user_id=user_id,
+            message=notification_data.message,
+            notification_type=notification_data.notification_type,
+            related_entity_id=notification_data.related_entity_id,
+            created_at=datetime.utcnow(),
+            read=False
+        )
+        self.db.add(notification)
+        await self.db.commit()
+        await self.db.refresh(notification)
+        return notification
+
+    async def get_user_notifications(
+        self,
+        user_id: int,
+        unread_only: bool = False,
+        limit: int = 50
+    ) -> List[Notification]:
+        """Get notifications for a user."""
+        query = select(Notification).where(Notification.user_id == user_id)
+        if unread_only:
+            query = query.where(Notification.read == False)
+        query = query.order_by(Notification.created_at.desc()).limit(limit)
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+
+    async def mark_as_read(self, notification_id: int, user_id: int) -> Optional[Notification]:
+        """Mark a notification as read."""
+        query = select(Notification).where(
+            Notification.id == notification_id,
+            Notification.user_id == user_id
+        )
+        result = await self.db.execute(query)
+        notification = result.scalar_one_or_none()
+        if notification:
+            notification.read = True
+            await self.db.commit()
+            await self.db.refresh(notification)
+        return notification
+
+    async def mark_all_as_read(self, user_id: int) -> int:
+        """Mark all notifications as read for a user."""
+        query = select(Notification).where(
+            Notification.user_id == user_id,
+            Notification.read == False
+        )
+        result = await self.db.execute(query)
+        notifications = result.scalars().all()
+        count = 0
+        for notification in notifications:
+            notification.read = True
+            count += 1
+        await self.db.commit()
+        return count
+
+    async def delete_notification(self, notification_id: int, user_id: int) -> bool:
+        """Delete a notification."""
+        query = select(Notification).where(
+            Notification.id == notification_id,
+            Notification.user_id == user_id
+        )
+        result = await self.db.execute(query)
+        notification = result.scalar_one_or_none()
+        if notification:
+            await self.db.delete(notification)
+            await self.db.commit()
+            return True
+        return False
+
+
+async def send_notification(
+    db: AsyncSession,
+    user_id: int,
+    message: str,
+    notification_type: str = "info",
+    related_entity_id: Optional[int] = None
+) -> Notification:
+    """Helper function to send a notification to a user."""
+    service = NotificationService(db)
+    notification_data = NotificationCreate(
+        message=message,
+        notification_type=notification_type,
+        related_entity_id=related_entity_id
+    )
+    return await service.create_notification(user_id, notification_data)
